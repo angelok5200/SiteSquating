@@ -22,4 +22,14 @@ public class CandidateDomain {
 
     private Instant firstSeen;
     private Instant lastSeen;
+
+    public String getDomain() {
+        return domain;
+    }
+
+    public CandidateDomain(UUID id, UUID brandid, String domain) {
+        this.id = id;
+        this.brandid = brandid;
+        this.domain = domain;
+    }
 }

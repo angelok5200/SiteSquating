@@ -1,16 +1,21 @@
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- */
-
 package org.tafel.squating;
 
 /**
  *
  * @author Liaskovych
  */
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.tafel.squating.config.ApplicationProperties;
+
+@EnableConfigurationProperties(ApplicationProperties.class)
+@SpringBootApplication
+@EnableScheduling
 public class SiteSquating {
 
     public static void main(String[] args) {
-        System.out.println("Hello World!");
+        SpringApplication.run(SiteSquating.class, args);
     }
 }
