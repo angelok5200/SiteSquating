@@ -1,22 +1,40 @@
-```java id="k1f4zt"
-package org.tafel.squating.adapters.mail;
+```java
+package org.tafel.squating.adapters.certificate;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
-import org.tafel.squating.domain.value.MailSnapshot;
-import org.tafel.squating.ports.outbound.MailInspector;
-import org.xbill.DNS.Lookup;
-import org.xbill.DNS.MXRecord;
-import org.xbill.DNS.Record;
-import org.xbill.DNS.Type;
+import org.tafel.squating.ports.outbound.CertificateDiscovery;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
 @Component
-public class MailAdapter implements MailInspector {
+public class CertificateAdapter implements CertificateDiscovery {
+
+    private static final String CRT_SH_URL =
+        "https://crt.sh/?q=%25s&output=json";
+
+    private final HttpClient httpClient;
+    private final ObjectMapper objectMapper;
+
+    public CertificateAdapter(ObjectMapper objectMapper) {
+        this.httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
+
+        this.objectMapper = objectMapper;
+    }
 
     @Override
-    public MailSnapshot inspect(String domain) {
+    public List<String> findCertificate(String domain) {
         if (domain == null || domain.isBlank()) {
             throw new IllegalArgumentException(
                 "domain must not be blank"
@@ -26,45 +44,90 @@ public class MailAdapter implements MailInspector {
         String normalizedDomain =
             normalizeDomain(domain);
 
-        List<String> mxRecords =
-            lookupMxRecords(normalizedDomain);
+        String encodedDomain =
+            URLEncoder.encode(
+                "%." + normalizedDomain,
+                StandardCharsets.UTF_8
+            );
 
-        return new MailSnapshot(
-            mxRecords,
-            !mxRecords.isEmpty()
-        );
-    }
+        String url =
+            String.format(
+                CRT_SH_URL,
+                encodedDomain
+            );
 
-    private List<String> lookupMxRecords(
-        String domain
-    ) {
+        HttpRequest request =
+            HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(15))
+                .header(
+                    "Accept",
+                    "application/json"
+                )
+                .header(
+                    "User-Agent",
+                    "SiteSquatingMonitor/1.0"
+                )
+                .GET()
+                .build();
+
         try {
-            Lookup lookup =
-                new Lookup(domain, Type.MX);
+            HttpResponse<String> response =
+                httpClient.send(
+                    request,
+                    HttpResponse.BodyHandlers.ofString()
+                );
 
-            Record[] records =
-                lookup.run();
-
-            if (records == null) {
+            if (response.statusCode() != 200) {
                 return List.of();
             }
 
-            List<String> result =
+            JsonNode root =
+                objectMapper.readTree(response.body());
+
+            if (!root.isArray()) {
+                return List.of();
+            }
+
+            List<String> certificates =
                 new ArrayList<>();
 
-            for (Record record : records) {
-                if (!(record instanceof MXRecord mxRecord)) {
+            for (JsonNode certificate : root) {
+                String commonName =
+                    certificate
+                        .path("common_name")
+                        .asText(null);
+
+                if (commonName != null &&
+                    !commonName.isBlank()) {
+
+                    certificates.add(commonName);
+                }
+
+                JsonNode nameValue =
+                    certificate.get("name_value");
+
+                if (nameValue == null ||
+                    nameValue.isNull()) {
                     continue;
                 }
 
-                result.add(
-                    mxRecord.getPriority()
-                        + " "
-                        + mxRecord.getTarget()
-                );
+                String[] names =
+                    nameValue.asText().split("\\R");
+
+                for (String name : names) {
+                    String normalized =
+                        name.trim().toLowerCase();
+
+                    if (!normalized.isBlank()) {
+                        certificates.add(normalized);
+                    }
+                }
             }
 
-            return List.copyOf(result);
+            return certificates.stream()
+                .distinct()
+                .toList();
 
         } catch (Exception e) {
             return List.of();
@@ -74,6 +137,24 @@ public class MailAdapter implements MailInspector {
     private String normalizeDomain(String domain) {
         String normalized =
             domain.trim().toLowerCase();
+
+        if (normalized.startsWith("https://")) {
+            normalized =
+                normalized.substring(8);
+        }
+
+        if (normalized.startsWith("http://")) {
+            normalized =
+                normalized.substring(7);
+        }
+
+        int slash =
+            normalized.indexOf('/');
+
+        if (slash >= 0) {
+            normalized =
+                normalized.substring(0, slash);
+        }
 
         if (normalized.endsWith(".")) {
             normalized =
