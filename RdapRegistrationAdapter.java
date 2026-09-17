@@ -1,143 +1,201 @@
 ```java
-package org.tafel.squating.adapters.http;
+package org.tafel.squating.adapters.tls;
 
 import org.springframework.stereotype.Component;
-import org.tafel.squating.domain.value.HttpSnapshot;
-import org.tafel.squating.ports.outbound.WebInspector;
+import org.tafel.squating.domain.value.TlsSnapshot;
+import org.tafel.squating.ports.outbound.TlsInspector;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
+import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+import java.net.InetSocketAddress;
+import java.security.MessageDigest;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
 @Component
-public class HttpAdapter implements WebInspector {
+public class TlsAdapter implements TlsInspector {
 
-    private final HttpClient httpClient;
-
-    public HttpAdapter() {
-        this.httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
-    }
+    private static final int TLS_PORT = 443;
+    private static final int CONNECTION_TIMEOUT_MILLIS = 10_000;
 
     @Override
-    public HttpSnapshot inspect(String domain) {
+    public TlsSnapshot inspect(String domain) {
         if (domain == null || domain.isBlank()) {
             throw new IllegalArgumentException(
                 "domain must not be blank"
             );
         }
 
-        String url = normalizeUrl(domain);
+        String normalizedDomain = normalizeDomain(domain);
 
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(15))
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0"
-                )
-                .GET()
-                .build();
+            SSLSocketFactory factory =
+                (SSLSocketFactory) SSLSocketFactory.getDefault();
 
-            HttpResponse<String> response =
-                httpClient.send(
-                    request,
-                    HttpResponse.BodyHandlers.ofString()
+            try (SSLSocket socket =
+                     (SSLSocket) factory.createSocket()) {
+
+                socket.connect(
+                    new InetSocketAddress(
+                        normalizedDomain,
+                        TLS_PORT
+                    ),
+                    CONNECTION_TIMEOUT_MILLIS
                 );
 
-            List<String> redirectChain =
-                buildRedirectChain(response);
+                socket.startHandshake();
 
-            String contentType =
-                response.headers()
-                    .firstValue("Content-Type")
-                    .orElse(null);
+                SSLSession session = socket.getSession();
 
-            String title =
-                extractTitle(response.body());
+                X509Certificate certificate =
+                    getCertificate(session);
 
-            long contentLength =
-                response.body() != null
-                    ? response.body().getBytes().length
-                    : 0;
+                return new TlsSnapshot(
+                    certificate.getIssuerX500Principal()
+                        .getName(),
 
-            return new HttpSnapshot(
-                response.statusCode(),
-                response.uri().toString(),
-                redirectChain,
-                title,
-                contentType,
-                contentLength
-            );
+                    certificate.getSubjectX500Principal()
+                        .getName(),
+
+                    extractSubjectAlternativeNames(
+                        certificate
+                    ),
+
+                    certificate.getNotBefore()
+                        .toInstant(),
+
+                    certificate.getNotAfter()
+                        .toInstant(),
+
+                    calculateFingerprint(certificate)
+                );
+            }
 
         } catch (Exception e) {
-            return new HttpSnapshot(
-                0,
-                url,
+            return new TlsSnapshot(
+                null,
+                null,
                 List.of(),
                 null,
                 null,
-                0
+                null
             );
         }
     }
 
-    private String normalizeUrl(String domain) {
+    private X509Certificate getCertificate(
+        SSLSession session
+    ) throws SSLPeerUnverifiedException {
+
+        Certificate[] certificates =
+            session.getPeerCertificates();
+
+        if (certificates.length == 0) {
+            throw new IllegalStateException(
+                "No peer certificate returned"
+            );
+        }
+
+        if (!(certificates[0] instanceof X509Certificate)) {
+            throw new IllegalStateException(
+                "Peer certificate is not X509"
+            );
+        }
+
+        return (X509Certificate) certificates[0];
+    }
+
+    private List<String> extractSubjectAlternativeNames(
+        X509Certificate certificate
+    ) {
+
+        try {
+            Collection<List<?>> names =
+                certificate.getSubjectAlternativeNames();
+
+            if (names == null) {
+                return List.of();
+            }
+
+            List<String> result = new ArrayList<>();
+
+            for (List<?> entry : names) {
+
+                if (entry == null || entry.size() < 2) {
+                    continue;
+                }
+
+                Object value = entry.get(1);
+
+                if (value != null) {
+                    result.add(value.toString());
+                }
+            }
+
+            return List.copyOf(result);
+
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private String calculateFingerprint(
+        X509Certificate certificate
+    ) {
+
+        try {
+            byte[] encoded =
+                certificate.getEncoded();
+
+            MessageDigest digest =
+                MessageDigest.getInstance("SHA-256");
+
+            byte[] hash =
+                digest.digest(encoded);
+
+            StringBuilder result =
+                new StringBuilder();
+
+            for (byte value : hash) {
+                result.append(
+                    String.format("%02X", value)
+                );
+            }
+
+            return result.toString();
+
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String normalizeDomain(String domain) {
         String normalized = domain.trim();
 
-        if (!normalized.startsWith("http://") &&
-            !normalized.startsWith("https://")) {
+        if (normalized.startsWith("https://")) {
+            normalized =
+                normalized.substring(8);
+        }
 
-            normalized = "https://" + normalized;
+        if (normalized.startsWith("http://")) {
+            normalized =
+                normalized.substring(7);
+        }
+
+        int slash = normalized.indexOf('/');
+
+        if (slash >= 0) {
+            normalized =
+                normalized.substring(0, slash);
         }
 
         return normalized;
-    }
-
-    private List<String> buildRedirectChain(
-        HttpResponse<String> response
-    ) {
-        List<String> chain = new ArrayList<>();
-
-        chain.add(response.uri().toString());
-
-        return List.copyOf(chain);
-    }
-
-    private String extractTitle(String html) {
-        if (html == null || html.isBlank()) {
-            return null;
-        }
-
-        String lower = html.toLowerCase();
-
-        int start = lower.indexOf("<title>");
-
-        if (start < 0) {
-            return null;
-        }
-
-        int contentStart = start + "<title>".length();
-
-        int end = lower.indexOf(
-            "</title>",
-            contentStart
-        );
-
-        if (end < 0) {
-            return null;
-        }
-
-        return html
-            .substring(contentStart, end)
-            .trim();
     }
 }
 ```
