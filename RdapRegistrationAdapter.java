@@ -1,141 +1,67 @@
-```java
-package org.tafel.squating.adapters.tls;
+```java id="k1f4zt"
+package org.tafel.squating.adapters.mail;
 
 import org.springframework.stereotype.Component;
-import org.tafel.squating.domain.value.TlsSnapshot;
-import org.tafel.squating.ports.outbound.TlsInspector;
+import org.tafel.squating.domain.value.MailSnapshot;
+import org.tafel.squating.ports.outbound.MailInspector;
+import org.xbill.DNS.Lookup;
+import org.xbill.DNS.MXRecord;
+import org.xbill.DNS.Record;
+import org.xbill.DNS.Type;
 
-import javax.net.ssl.SSLPeerUnverifiedException;
-import javax.net.ssl.SSLSession;
-import javax.net.ssl.SSLSocket;
-import javax.net.ssl.SSLSocketFactory;
-import java.net.InetSocketAddress;
-import java.security.MessageDigest;
-import java.security.cert.Certificate;
-import java.security.cert.X509Certificate;
-import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 
 @Component
-public class TlsAdapter implements TlsInspector {
-
-    private static final int TLS_PORT = 443;
-    private static final int CONNECTION_TIMEOUT_MILLIS = 10_000;
+public class MailAdapter implements MailInspector {
 
     @Override
-    public TlsSnapshot inspect(String domain) {
+    public MailSnapshot inspect(String domain) {
         if (domain == null || domain.isBlank()) {
             throw new IllegalArgumentException(
                 "domain must not be blank"
             );
         }
 
-        String normalizedDomain = normalizeDomain(domain);
+        String normalizedDomain =
+            normalizeDomain(domain);
 
-        try {
-            SSLSocketFactory factory =
-                (SSLSocketFactory) SSLSocketFactory.getDefault();
+        List<String> mxRecords =
+            lookupMxRecords(normalizedDomain);
 
-            try (SSLSocket socket =
-                     (SSLSocket) factory.createSocket()) {
-
-                socket.connect(
-                    new InetSocketAddress(
-                        normalizedDomain,
-                        TLS_PORT
-                    ),
-                    CONNECTION_TIMEOUT_MILLIS
-                );
-
-                socket.startHandshake();
-
-                SSLSession session = socket.getSession();
-
-                X509Certificate certificate =
-                    getCertificate(session);
-
-                return new TlsSnapshot(
-                    certificate.getIssuerX500Principal()
-                        .getName(),
-
-                    certificate.getSubjectX500Principal()
-                        .getName(),
-
-                    extractSubjectAlternativeNames(
-                        certificate
-                    ),
-
-                    certificate.getNotBefore()
-                        .toInstant(),
-
-                    certificate.getNotAfter()
-                        .toInstant(),
-
-                    calculateFingerprint(certificate)
-                );
-            }
-
-        } catch (Exception e) {
-            return new TlsSnapshot(
-                null,
-                null,
-                List.of(),
-                null,
-                null,
-                null
-            );
-        }
+        return new MailSnapshot(
+            mxRecords,
+            !mxRecords.isEmpty()
+        );
     }
 
-    private X509Certificate getCertificate(
-        SSLSession session
-    ) throws SSLPeerUnverifiedException {
-
-        Certificate[] certificates =
-            session.getPeerCertificates();
-
-        if (certificates.length == 0) {
-            throw new IllegalStateException(
-                "No peer certificate returned"
-            );
-        }
-
-        if (!(certificates[0] instanceof X509Certificate)) {
-            throw new IllegalStateException(
-                "Peer certificate is not X509"
-            );
-        }
-
-        return (X509Certificate) certificates[0];
-    }
-
-    private List<String> extractSubjectAlternativeNames(
-        X509Certificate certificate
+    private List<String> lookupMxRecords(
+        String domain
     ) {
-
         try {
-            Collection<List<?>> names =
-                certificate.getSubjectAlternativeNames();
+            Lookup lookup =
+                new Lookup(domain, Type.MX);
 
-            if (names == null) {
+            Record[] records =
+                lookup.run();
+
+            if (records == null) {
                 return List.of();
             }
 
-            List<String> result = new ArrayList<>();
+            List<String> result =
+                new ArrayList<>();
 
-            for (List<?> entry : names) {
-
-                if (entry == null || entry.size() < 2) {
+            for (Record record : records) {
+                if (!(record instanceof MXRecord mxRecord)) {
                     continue;
                 }
 
-                Object value = entry.get(1);
-
-                if (value != null) {
-                    result.add(value.toString());
-                }
+                result.add(
+                    mxRecord.getPriority()
+                        + " "
+                        + mxRecord.getTarget()
+                );
             }
 
             return List.copyOf(result);
@@ -145,54 +71,16 @@ public class TlsAdapter implements TlsInspector {
         }
     }
 
-    private String calculateFingerprint(
-        X509Certificate certificate
-    ) {
-
-        try {
-            byte[] encoded =
-                certificate.getEncoded();
-
-            MessageDigest digest =
-                MessageDigest.getInstance("SHA-256");
-
-            byte[] hash =
-                digest.digest(encoded);
-
-            StringBuilder result =
-                new StringBuilder();
-
-            for (byte value : hash) {
-                result.append(
-                    String.format("%02X", value)
-                );
-            }
-
-            return result.toString();
-
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     private String normalizeDomain(String domain) {
-        String normalized = domain.trim();
+        String normalized =
+            domain.trim().toLowerCase();
 
-        if (normalized.startsWith("https://")) {
+        if (normalized.endsWith(".")) {
             normalized =
-                normalized.substring(8);
-        }
-
-        if (normalized.startsWith("http://")) {
-            normalized =
-                normalized.substring(7);
-        }
-
-        int slash = normalized.indexOf('/');
-
-        if (slash >= 0) {
-            normalized =
-                normalized.substring(0, slash);
+                normalized.substring(
+                    0,
+                    normalized.length() - 1
+                );
         }
 
         return normalized;
