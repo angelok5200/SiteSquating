@@ -1,136 +1,143 @@
 ```java
-package org.tafel.squating.adapters.dns;
+package org.tafel.squating.adapters.http;
 
 import org.springframework.stereotype.Component;
-import org.tafel.squating.domain.value.DnsSnapshot;
-import org.tafel.squating.ports.outbound.DnsInspector;
-import org.xbill.DNS.ARecord;
-import org.xbill.DNS.CNAMERecord;
-import org.xbill.DNS.Lookup;
-import org.xbill.DNS.MXRecord;
-import org.xbill.DNS.NSRecord;
-import org.xbill.DNS.Record;
-import org.xbill.DNS.TXTRecord;
-import org.xbill.DNS.Type;
+import org.tafel.squating.domain.value.HttpSnapshot;
+import org.tafel.squating.ports.outbound.WebInspector;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
 @Component
-public class DnsAdapter implements DnsInspector {
+public class HttpAdapter implements WebInspector {
+
+    private final HttpClient httpClient;
+
+    public HttpAdapter() {
+        this.httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .build();
+    }
 
     @Override
-    public DnsSnapshot inspect(String domain) {
+    public HttpSnapshot inspect(String domain) {
         if (domain == null || domain.isBlank()) {
             throw new IllegalArgumentException(
                 "domain must not be blank"
             );
         }
 
-        String normalizedDomain = normalizeDomain(domain);
+        String url = normalizeUrl(domain);
 
-        List<String> a = lookup(
-            normalizedDomain,
-            Type.A
-        );
-
-        List<String> aaa = lookup(
-            normalizedDomain,
-            Type.AAAA
-        );
-
-        List<String> txt = lookup(
-            normalizedDomain,
-            Type.TXT
-        );
-
-        List<String> mx = lookup(
-            normalizedDomain,
-            Type.MX
-        );
-
-        List<String> ns = lookup(
-            normalizedDomain,
-            Type.NS
-        );
-
-        List<String> cname = lookup(
-            normalizedDomain,
-            Type.CNAME
-        );
-
-        return new DnsSnapshot(
-            a,
-            aaa,
-            txt,
-            mx,
-            ns,
-            cname
-        );
-    }
-
-    private List<String> lookup(
-        String domain,
-        int recordType
-    ) {
         try {
-            Lookup lookup = new Lookup(domain, recordType);
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(15))
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0"
+                )
+                .GET()
+                .build();
 
-            Record[] records = lookup.run();
+            HttpResponse<String> response =
+                httpClient.send(
+                    request,
+                    HttpResponse.BodyHandlers.ofString()
+                );
 
-            if (records == null) {
-                return List.of();
-            }
+            List<String> redirectChain =
+                buildRedirectChain(response);
 
-            List<String> result = new ArrayList<>();
+            String contentType =
+                response.headers()
+                    .firstValue("Content-Type")
+                    .orElse(null);
 
-            for (Record record : records) {
-                result.add(formatRecord(record));
-            }
+            String title =
+                extractTitle(response.body());
 
-            return List.copyOf(result);
+            long contentLength =
+                response.body() != null
+                    ? response.body().getBytes().length
+                    : 0;
+
+            return new HttpSnapshot(
+                response.statusCode(),
+                response.uri().toString(),
+                redirectChain,
+                title,
+                contentType,
+                contentLength
+            );
 
         } catch (Exception e) {
-            return List.of();
+            return new HttpSnapshot(
+                0,
+                url,
+                List.of(),
+                null,
+                null,
+                0
+            );
         }
     }
 
-    private String formatRecord(Record record) {
+    private String normalizeUrl(String domain) {
+        String normalized = domain.trim();
 
-        if (record instanceof ARecord aRecord) {
-            return aRecord.getAddress().getHostAddress();
-        }
+        if (!normalized.startsWith("http://") &&
+            !normalized.startsWith("https://")) {
 
-        if (record instanceof CNAMERecord cnameRecord) {
-            return cnameRecord.getTarget().toString();
-        }
-
-        if (record instanceof MXRecord mxRecord) {
-            return mxRecord.getPriority()
-                + " "
-                + mxRecord.getTarget();
-        }
-
-        if (record instanceof NSRecord nsRecord) {
-            return nsRecord.getTarget().toString();
-        }
-
-        if (record instanceof TXTRecord txtRecord) {
-            return txtRecord.rdataToString();
-        }
-
-        return record.rdataToString();
-    }
-
-    private String normalizeDomain(String domain) {
-        String normalized = domain.trim().toLowerCase();
-
-        if (normalized.endsWith(".")) {
-            normalized =
-                normalized.substring(0, normalized.length() - 1);
+            normalized = "https://" + normalized;
         }
 
         return normalized;
+    }
+
+    private List<String> buildRedirectChain(
+        HttpResponse<String> response
+    ) {
+        List<String> chain = new ArrayList<>();
+
+        chain.add(response.uri().toString());
+
+        return List.copyOf(chain);
+    }
+
+    private String extractTitle(String html) {
+        if (html == null || html.isBlank()) {
+            return null;
+        }
+
+        String lower = html.toLowerCase();
+
+        int start = lower.indexOf("<title>");
+
+        if (start < 0) {
+            return null;
+        }
+
+        int contentStart = start + "<title>".length();
+
+        int end = lower.indexOf(
+            "</title>",
+            contentStart
+        );
+
+        if (end < 0) {
+            return null;
+        }
+
+        return html
+            .substring(contentStart, end)
+            .trim();
     }
 }
 ```
