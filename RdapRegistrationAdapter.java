@@ -1,69 +1,106 @@
-```java id="j5r8kd"
-package org.tafel.squating.generators;
+```java
+package org.tafel.squating.domain.model;
 
-import org.springframework.stereotype.Component;
 import org.tafel.squating.domain.enums.CandidateStatus;
 import org.tafel.squating.domain.enums.MutationType;
-import org.tafel.squating.domain.model.Brand;
-import org.tafel.squating.domain.model.CandidateDomain;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.UUID;
 
-@Component
-public class OmissionGenerator implements CandidateGenerator {
+public class CandidateDomain {
 
-    @Override
-    public List<CandidateDomain> generate(Brand brand) {
-        List<CandidateDomain> result = new ArrayList<>();
+    private final UUID id;
+    private final UUID brandId;
+    private final String domain;
+    private final String sourceDomain;
+    private final MutationType mutationType;
+    private final int editDistance;
+    private final double confidence;
+    private final CandidateStatus status;
+    private final Instant firstSeen;
+    private final Instant lastSeen;
 
-        if (brand == null || brand.getPrimaryDomain() == null
-                || brand.getPrimaryDomain().isBlank()) {
-            return result;
+    public CandidateDomain(
+            UUID brandId,
+            String domain,
+            String sourceDomain,
+            MutationType mutationType,
+            int editDistance,
+            double confidence,
+            CandidateStatus status,
+            Instant firstSeen,
+            Instant lastSeen
+    ) {
+        if (brandId == null) {
+            throw new IllegalArgumentException("brandId must not be null");
         }
 
-        String sourceDomain = brand.getPrimaryDomain();
-        int dot = sourceDomain.indexOf('.');
-
-        if (dot <= 0) {
-            return result;
+        if (domain == null || domain.isBlank()) {
+            throw new IllegalArgumentException("domain must not be blank");
         }
 
-        String name = sourceDomain.substring(0, dot);
-        String tld = sourceDomain.substring(dot);
-
-        if (name.length() <= 1) {
-            return result;
+        if (sourceDomain == null || sourceDomain.isBlank()) {
+            throw new IllegalArgumentException("sourceDomain must not be blank");
         }
 
-        for (int i = 0; i < name.length(); i++) {
-            String mutatedName =
-                    name.substring(0, i) + name.substring(i + 1);
-
-            String candidateDomain = mutatedName + tld;
-            Instant now = Instant.now();
-
-            result.add(new CandidateDomain(
-                    brand.getId(),
-                    1.0,
-                    candidateDomain,
-                    1,
-                    now,
-                    null,
-                    now,
-                    MutationType.OMISSION,
-                    sourceDomain,
-                    CandidateStatus.GENERATED
-            ));
+        if (mutationType == null) {
+            throw new IllegalArgumentException("mutationType must not be null");
         }
 
-        return result;
+        if (status == null) {
+            throw new IllegalArgumentException("status must not be null");
+        }
+
+        this.id = UUID.randomUUID();
+        this.brandId = brandId;
+        this.domain = domain;
+        this.sourceDomain = sourceDomain;
+        this.mutationType = mutationType;
+        this.editDistance = editDistance;
+        this.confidence = confidence;
+        this.status = status;
+        this.firstSeen = firstSeen != null ? firstSeen : Instant.now();
+        this.lastSeen = lastSeen != null ? lastSeen : this.firstSeen;
     }
 
-    @Override
+    public UUID getId() {
+        return id;
+    }
+
+    public UUID getBrandId() {
+        return brandId;
+    }
+
+    public String getDomain() {
+        return domain;
+    }
+
+    public String getSourceDomain() {
+        return sourceDomain;
+    }
+
     public MutationType getMutationType() {
-        return MutationType.OMISSION;
+        return mutationType;
+    }
+
+    public int getEditDistance() {
+        return editDistance;
+    }
+
+    public double getConfidence() {
+        return confidence;
+    }
+
+    public CandidateStatus getStatus() {
+        return status;
+    }
+
+    public Instant getFirstSeen() {
+        return firstSeen;
+    }
+
+    public Instant getLastSeen() {
+        return lastSeen;
     }
 }
 ```
