@@ -1,170 +1,159 @@
 ```java
-package org.tafel.squating.adapters.http;
+package org.tafel.squating.adapters.tls;
 
 import org.springframework.stereotype.Component;
-import org.tafel.squating.domain.value.HttpSnapshot;
-import org.tafel.squating.ports.outbound.WebInspector;
+import org.tafel.squating.domain.value.TlsSnapshot;
+import org.tafel.squating.ports.outbound.TlsInspector;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+import java.net.SocketTimeoutException;
+import java.security.MessageDigest;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @Component
-public class HttpAdapter implements WebInspector {
+public class TlsAdapter implements TlsInspector {
 
-    private static final String USER_AGENT =
-            "Mozilla/5.0 (compatible; SiteSquating/1.0)";
-
-    private static final int MAX_REDIRECTS = 10;
-
-    private static final Pattern TITLE_PATTERN =
-            Pattern.compile(
-                    "<title[^>]*>(.*?)</title>",
-                    Pattern.CASE_INSENSITIVE
-                            | Pattern.DOTALL
-            );
-
-    private final HttpClient httpClient;
-
-    public HttpAdapter(HttpClient httpClient) {
-        this.httpClient = httpClient;
-    }
+    private static final int HTTPS_PORT = 443;
+    private static final int CONNECT_TIMEOUT_MILLIS = 5000;
 
     @Override
-    public HttpSnapshot inspect(String domain) {
+    public TlsSnapshot inspect(String domain) {
         if (domain == null || domain.isBlank()) {
             throw new IllegalArgumentException("domain must not be blank");
         }
 
-        URI initialUri = createInitialUri(domain);
+        String normalizedDomain = normalizeDomain(domain);
 
-        List<String> redirectChain = new ArrayList<>();
+        try (SSLSocket socket = createSocket(normalizedDomain)) {
+            socket.setSoTimeout(CONNECT_TIMEOUT_MILLIS);
 
-        URI currentUri = initialUri;
+            socket.startHandshake();
 
-        for (int redirectCount = 0;
-             redirectCount <= MAX_REDIRECTS;
-             redirectCount++) {
+            Certificate[] certificates =
+                    socket.getSession().getPeerCertificates();
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(currentUri)
-                    .header("User-Agent", USER_AGENT)
-                    .header("Accept", "text/html,application/xhtml+xml,*/*")
-                    .GET()
-                    .build();
+            if (certificates.length == 0
+                    || !(certificates[0] instanceof X509Certificate certificate)) {
+                return emptySnapshot();
+            }
 
-            try {
-                HttpResponse<String> response =
-                        httpClient.send(
-                                request,
-                                HttpResponse.BodyHandlers.ofString()
-                        );
+            return new TlsSnapshot(
+                    certificate.getIssuerX500Principal().getName(),
+                    certificate.getSubjectX500Principal().getName(),
+                    extractSubjectAlternativeNames(certificate),
+                    certificate.getNotBefore().toInstant(),
+                    certificate.getNotAfter().toInstant(),
+                    calculateFingerprint(certificate)
+            );
 
-                int statusCode = response.statusCode();
+        } catch (SocketTimeoutException e) {
+            return emptySnapshot();
 
-                if (isRedirect(statusCode)) {
-                    String location =
-                            response.headers()
-                                    .firstValue("Location")
-                                    .orElse(null);
+        } catch (Exception e) {
+            return emptySnapshot();
+        }
+    }
 
-                    if (location == null || location.isBlank()) {
-                        return createSnapshot(
-                                response,
-                                currentUri,
-                                redirectChain
-                        );
-                    }
+    private SSLSocket createSocket(String domain) throws Exception {
+        SSLSocketFactory factory =
+                (SSLSocketFactory) SSLSocketFactory.getDefault();
 
-                    URI nextUri = currentUri.resolve(location);
+        SSLSocket socket =
+                (SSLSocket) factory.createSocket();
 
-                    redirectChain.add(nextUri.toString());
-                    currentUri = nextUri;
+        socket.connect(
+                new java.net.InetSocketAddress(domain, HTTPS_PORT),
+                CONNECT_TIMEOUT_MILLIS
+        );
 
+        return socket;
+    }
+
+    private List<String> extractSubjectAlternativeNames(
+            X509Certificate certificate
+    ) {
+        try {
+            Collection<List<?>> names =
+                    certificate.getSubjectAlternativeNames();
+
+            if (names == null) {
+                return List.of();
+            }
+
+            List<String> result = new ArrayList<>();
+
+            for (List<?> entry : names) {
+                if (entry == null || entry.size() < 2) {
                     continue;
                 }
 
-                return createSnapshot(
-                        response,
-                        currentUri,
-                        redirectChain
-                );
+                Object value = entry.get(1);
 
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-
-                throw new IllegalStateException(
-                        "HTTP inspection interrupted for " + domain,
-                        e
-                );
-
-            } catch (IOException e) {
-                throw new IllegalStateException(
-                        "HTTP inspection failed for " + domain,
-                        e
-                );
+                if (value != null) {
+                    result.add(value.toString());
+                }
             }
+
+            return result;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private String calculateFingerprint(
+            X509Certificate certificate
+    ) throws Exception {
+        MessageDigest digest =
+                MessageDigest.getInstance("SHA-256");
+
+        byte[] hash = digest.digest(certificate.getEncoded());
+
+        StringBuilder result = new StringBuilder();
+
+        for (byte value : hash) {
+            if (!result.isEmpty()) {
+                result.append(':');
+            }
+
+            result.append(String.format("%02X", value));
         }
 
-        throw new IllegalStateException(
-                "Maximum HTTP redirects exceeded for " + domain
+        return result.toString();
+    }
+
+    private String normalizeDomain(String domain) {
+        String normalized = domain.trim().toLowerCase();
+
+        if (normalized.startsWith("https://")) {
+            normalized = normalized.substring(8);
+        } else if (normalized.startsWith("http://")) {
+            normalized = normalized.substring(7);
+        }
+
+        int slashIndex = normalized.indexOf('/');
+
+        if (slashIndex >= 0) {
+            normalized = normalized.substring(0, slashIndex);
+        }
+
+        return normalized;
+    }
+
+    private TlsSnapshot emptySnapshot() {
+        return new TlsSnapshot(
+                null,
+                null,
+                List.of(),
+                null,
+                null,
+                null
         );
-    }
-
-    private HttpSnapshot createSnapshot(
-            HttpResponse<String> response,
-            URI finalUri,
-            List<String> redirectChain
-    ) {
-        String body = response.body();
-
-        return new HttpSnapshot(
-                response.statusCode(),
-                finalUri.toString(),
-                redirectChain,
-                extractTitle(body),
-                response.headers()
-                        .firstValue("Content-Type")
-                        .orElse(null),
-                body != null ? body.getBytes().length : 0
-        );
-    }
-
-    private URI createInitialUri(String domain) {
-        String normalized = domain.trim();
-
-        if (normalized.startsWith("http://")
-                || normalized.startsWith("https://")) {
-            return URI.create(normalized);
-        }
-
-        return URI.create("https://" + normalized);
-    }
-
-    private boolean isRedirect(int statusCode) {
-        return statusCode >= 300 && statusCode < 400;
-    }
-
-    private String extractTitle(String html) {
-        if (html == null || html.isBlank()) {
-            return null;
-        }
-
-        Matcher matcher = TITLE_PATTERN.matcher(html);
-
-        if (!matcher.find()) {
-            return null;
-        }
-
-        return matcher.group(1)
-                .replaceAll("\\s+", " ")
-                .trim();
     }
 }
 ```
