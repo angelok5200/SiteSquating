@@ -2,151 +2,157 @@
 package org.tafel.squating.analysis;
 
 import org.springframework.stereotype.Component;
-import org.tafel.squating.domain.enums.ContentIndicator;
 
-import java.util.EnumSet;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 @Component
-public class ContentAnalyserImpl implements ContentAnalyser {
+public class SimilarityAnalyserImpl {
 
-    private static final Pattern PASSWORD_FIELD =
-            Pattern.compile(
-                    "<input[^>]*type\\s*=\\s*[\"']password[\"'][^>]*>",
-                    Pattern.CASE_INSENSITIVE
-            );
+    public SimilarityResult analyze(
+            String candidateText,
+            String referenceText,
+            byte[] candidateLogo,
+            byte[] referenceLogo,
+            byte[] candidateFavicon,
+            byte[] referenceFavicon
+    ) {
+        double textSimilarity =
+                calculateTextSimilarity(candidateText, referenceText);
 
-    private static final Pattern LOGIN_FORM =
-            Pattern.compile(
-                    "<form[^>]*>.*?(login|signin|sign-in|sign in|log in).*?</form>",
-                    Pattern.CASE_INSENSITIVE | Pattern.DOTALL
-            );
+        double logoSimilarity =
+                calculateLogoSimilarity(candidateLogo, referenceLogo);
 
-    @Override
-    public ContentAnalysis analyse(String html, String brand) {
-        if (html == null || html.isBlank()) {
-            return new ContentAnalysis(
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    Set.of()
-            );
-        }
+        boolean faviconMatch =
+                calculateFaviconMatch(candidateFavicon, referenceFavicon);
 
-        String normalizedHtml = html.toLowerCase(Locale.ROOT);
-        String visibleText = extractVisibleText(html);
-
-        boolean brandMentioned =
-                brand != null
-                        && !brand.isBlank()
-                        && visibleText.contains(
-                                brand.toLowerCase(Locale.ROOT)
-                        );
-
-        boolean loginFormDetected =
-                LOGIN_FORM.matcher(normalizedHtml).find()
-                        || containsKeyword(
-                                visibleText,
-                                ContentRules.LOGIN_KEYWORDS
-                        );
-
-        boolean passwordFieldDetected =
-                PASSWORD_FIELD.matcher(normalizedHtml).find();
-
-        boolean walletKeywordsDetected =
-                containsKeyword(
-                        visibleText,
-                        ContentRules.WALLET_KEYWORDS
-                );
-
-        boolean paymentKeywordsDetected =
-                containsKeyword(
-                        visibleText,
-                        ContentRules.PAYMENT_KEYWORDS
-                );
-
-        EnumSet<ContentIndicator> indicators =
-                EnumSet.noneOf(ContentIndicator.class);
-
-        if (brandMentioned) {
-            indicators.add(ContentIndicator.BRAND_MENTIONED);
-        }
-
-        if (loginFormDetected) {
-            indicators.add(ContentIndicator.LOGIN_FORM);
-        }
-
-        if (passwordFieldDetected) {
-            indicators.add(ContentIndicator.PASSWORD_FIELD);
-        }
-
-        if (walletKeywordsDetected) {
-            indicators.add(ContentIndicator.WALLET_KEYWORDS);
-        }
-
-        if (paymentKeywordsDetected) {
-            indicators.add(ContentIndicator.PAYMENT_KEYWORDS);
-        }
-
-        return new ContentAnalysis(
-                brandMentioned,
-                loginFormDetected,
-                passwordFieldDetected,
-                walletKeywordsDetected,
-                paymentKeywordsDetected,
-                indicators
+        return new SimilarityResult(
+                textSimilarity,
+                logoSimilarity,
+                faviconMatch
         );
     }
 
-    private boolean containsKeyword(
-            String text,
-            Set<String> keywords
+    private double calculateTextSimilarity(
+            String candidate,
+            String reference
     ) {
-        for (String keyword : keywords) {
-            if (text.contains(keyword)) {
-                return true;
+        Set<String> candidateWords = tokenize(candidate);
+        Set<String> referenceWords = tokenize(reference);
+
+        if (candidateWords.isEmpty() && referenceWords.isEmpty()) {
+            return 1.0;
+        }
+
+        if (candidateWords.isEmpty() || referenceWords.isEmpty()) {
+            return 0.0;
+        }
+
+        Set<String> intersection =
+                new HashSet<>(candidateWords);
+        intersection.retainAll(referenceWords);
+
+        Set<String> union =
+                new HashSet<>(candidateWords);
+        union.addAll(referenceWords);
+
+        return (double) intersection.size() / union.size();
+    }
+
+    private Set<String> tokenize(String text) {
+        if (text == null || text.isBlank()) {
+            return Set.of();
+        }
+
+        String normalized = text
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^\\p{L}\\p{N}]+", " ")
+                .trim();
+
+        if (normalized.isBlank()) {
+            return Set.of();
+        }
+
+        return new HashSet<>(
+                Arrays.asList(normalized.split("\\s+"))
+        );
+    }
+
+    private double calculateLogoSimilarity(
+            byte[] candidateLogo,
+            byte[] referenceLogo
+    ) {
+        if (candidateLogo == null
+                || referenceLogo == null
+                || candidateLogo.length == 0
+                || referenceLogo.length == 0) {
+            return 0.0;
+        }
+
+        /*
+         * The actual logo comparison is intentionally represented
+         * as a byte-level similarity here.
+         *
+         * Image pHash/Hamming-distance comparison belongs in the
+         * image-processing adapter and can replace this calculation
+         * without changing SimilarityResult.
+         */
+        int commonLength =
+                Math.min(candidateLogo.length, referenceLogo.length);
+
+        if (commonLength == 0) {
+            return 0.0;
+        }
+
+        int equalBytes = 0;
+
+        for (int i = 0; i < commonLength; i++) {
+            if (candidateLogo[i] == referenceLogo[i]) {
+                equalBytes++;
             }
         }
 
-        return false;
+        double lengthPenalty =
+                (double) commonLength
+                        / Math.max(candidateLogo.length, referenceLogo.length);
+
+        return ((double) equalBytes / commonLength) * lengthPenalty;
     }
 
-    private String extractVisibleText(String html) {
-        return html
-                .replaceAll(
-                        "(?is)<script[^>]*>.*?</script>",
-                        " "
-                )
-                .replaceAll(
-                        "(?is)<style[^>]*>.*?</style>",
-                        " "
-                )
-                .replaceAll(
-                        "(?is)<noscript[^>]*>.*?</noscript>",
-                        " "
-                )
-                .replaceAll(
-                        "(?is)<[^>]+>",
-                        " "
-                )
-                .replaceAll(
-                        "&nbsp;",
-                        " "
-                )
-                .replaceAll(
-                        "&amp;",
-                        "&"
-                )
-                .replaceAll(
-                        "\\s+",
-                        " "
-                )
-                .trim()
-                .toLowerCase(Locale.ROOT);
+    private boolean calculateFaviconMatch(
+            byte[] candidateFavicon,
+            byte[] referenceFavicon
+    ) {
+        if (candidateFavicon == null
+                || referenceFavicon == null
+                || candidateFavicon.length == 0
+                || referenceFavicon.length == 0) {
+            return false;
+        }
+
+        byte[] candidateHash = sha256(candidateFavicon);
+        byte[] referenceHash = sha256(referenceFavicon);
+
+        return Arrays.equals(candidateHash, referenceHash);
+    }
+
+    private byte[] sha256(byte[] data) {
+        try {
+            MessageDigest digest =
+                    MessageDigest.getInstance("SHA-256");
+
+            return digest.digest(data);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(
+                    "SHA-256 algorithm is not available",
+                    e
+            );
+        }
     }
 }
 ```
