@@ -1,132 +1,152 @@
 ```java
-package org.tafel.squating.adapters.certificate;
+package org.tafel.squating.analysis;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
-import org.tafel.squating.ports.outbound.CertificateDiscovery;
+import org.tafel.squating.domain.enums.ContentIndicator;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
-import java.util.List;
+import java.util.EnumSet;
+import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @Component
-public class CertificateAdapter implements CertificateDiscovery {
+public class ContentAnalyserImpl implements ContentAnalyser {
 
-    private static final String CRT_SH_URL =
-            "https://crt.sh/?q=%25.%s&output=json";
+    private static final Pattern PASSWORD_FIELD =
+            Pattern.compile(
+                    "<input[^>]*type\\s*=\\s*[\"']password[\"'][^>]*>",
+                    Pattern.CASE_INSENSITIVE
+            );
 
-    private final HttpClient httpClient;
-    private final ObjectMapper objectMapper;
-
-    public CertificateAdapter(
-            HttpClient httpClient,
-            ObjectMapper objectMapper
-    ) {
-        this.httpClient = httpClient;
-        this.objectMapper = objectMapper;
-    }
+    private static final Pattern LOGIN_FORM =
+            Pattern.compile(
+                    "<form[^>]*>.*?(login|signin|sign-in|sign in|log in).*?</form>",
+                    Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+            );
 
     @Override
-    public List<String> findCertificates(String domain) {
-        if (domain == null || domain.isBlank()) {
-            throw new IllegalArgumentException("domain must not be blank");
+    public ContentAnalysis analyse(String html, String brand) {
+        if (html == null || html.isBlank()) {
+            return new ContentAnalysis(
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    Set.of()
+            );
         }
 
-        String normalizedDomain = normalizeDomain(domain);
+        String normalizedHtml = html.toLowerCase(Locale.ROOT);
+        String visibleText = extractVisibleText(html);
 
-        String encodedDomain = URLEncoder.encode(
-                normalizedDomain,
-                StandardCharsets.UTF_8
-        );
+        boolean brandMentioned =
+                brand != null
+                        && !brand.isBlank()
+                        && visibleText.contains(
+                                brand.toLowerCase(Locale.ROOT)
+                        );
 
-        URI uri = URI.create(
-                String.format(CRT_SH_URL, encodedDomain)
-        );
+        boolean loginFormDetected =
+                LOGIN_FORM.matcher(normalizedHtml).find()
+                        || containsKeyword(
+                                visibleText,
+                                ContentRules.LOGIN_KEYWORDS
+                        );
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(uri)
-                .header(
-                        "User-Agent",
-                        "Mozilla/5.0 (compatible; SiteSquating/1.0)"
-                )
-                .header("Accept", "application/json")
-                .GET()
-                .build();
+        boolean passwordFieldDetected =
+                PASSWORD_FIELD.matcher(normalizedHtml).find();
 
-        try {
-            HttpResponse<String> response = httpClient.send(
-                    request,
-                    HttpResponse.BodyHandlers.ofString()
-            );
-
-            if (response.statusCode() < 200
-                    || response.statusCode() >= 300) {
-                return List.of();
-            }
-
-            JsonNode root = objectMapper.readTree(response.body());
-
-            if (!root.isArray()) {
-                return List.of();
-            }
-
-            Set<String> certificates = new LinkedHashSet<>();
-
-            for (JsonNode certificate : root) {
-                addValue(
-                        certificates,
-                        certificate.path("common_name").asText(null)
+        boolean walletKeywordsDetected =
+                containsKeyword(
+                        visibleText,
+                        ContentRules.WALLET_KEYWORDS
                 );
 
-                String nameValue =
-                        certificate.path("name_value").asText(null);
+        boolean paymentKeywordsDetected =
+                containsKeyword(
+                        visibleText,
+                        ContentRules.PAYMENT_KEYWORDS
+                );
 
-                if (nameValue != null) {
-                    for (String value : nameValue.split("\\R")) {
-                        addValue(certificates, value);
-                    }
-                }
+        EnumSet<ContentIndicator> indicators =
+                EnumSet.noneOf(ContentIndicator.class);
+
+        if (brandMentioned) {
+            indicators.add(ContentIndicator.BRAND_MENTIONED);
+        }
+
+        if (loginFormDetected) {
+            indicators.add(ContentIndicator.LOGIN_FORM);
+        }
+
+        if (passwordFieldDetected) {
+            indicators.add(ContentIndicator.PASSWORD_FIELD);
+        }
+
+        if (walletKeywordsDetected) {
+            indicators.add(ContentIndicator.WALLET_KEYWORDS);
+        }
+
+        if (paymentKeywordsDetected) {
+            indicators.add(ContentIndicator.PAYMENT_KEYWORDS);
+        }
+
+        return new ContentAnalysis(
+                brandMentioned,
+                loginFormDetected,
+                passwordFieldDetected,
+                walletKeywordsDetected,
+                paymentKeywordsDetected,
+                indicators
+        );
+    }
+
+    private boolean containsKeyword(
+            String text,
+            Set<String> keywords
+    ) {
+        for (String keyword : keywords) {
+            if (text.contains(keyword)) {
+                return true;
             }
-
-            return List.copyOf(certificates);
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return List.of();
-
-        } catch (IOException | IllegalArgumentException e) {
-            return List.of();
         }
+
+        return false;
     }
 
-    private void addValue(Set<String> values, String value) {
-        if (value == null || value.isBlank()) {
-            return;
-        }
-
-        values.add(value.trim().toLowerCase());
-    }
-
-    private String normalizeDomain(String domain) {
-        String normalized = domain.trim().toLowerCase();
-
-        if (normalized.endsWith(".")) {
-            normalized = normalized.substring(
-                    0,
-                    normalized.length() - 1
-            );
-        }
-
-        return normalized;
+    private String extractVisibleText(String html) {
+        return html
+                .replaceAll(
+                        "(?is)<script[^>]*>.*?</script>",
+                        " "
+                )
+                .replaceAll(
+                        "(?is)<style[^>]*>.*?</style>",
+                        " "
+                )
+                .replaceAll(
+                        "(?is)<noscript[^>]*>.*?</noscript>",
+                        " "
+                )
+                .replaceAll(
+                        "(?is)<[^>]+>",
+                        " "
+                )
+                .replaceAll(
+                        "&nbsp;",
+                        " "
+                )
+                .replaceAll(
+                        "&amp;",
+                        "&"
+                )
+                .replaceAll(
+                        "\\s+",
+                        " "
+                )
+                .trim()
+                .toLowerCase(Locale.ROOT);
     }
 }
 ```
