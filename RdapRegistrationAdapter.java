@@ -1,159 +1,71 @@
 ```java
-package org.tafel.squating.adapters.tls;
+package org.tafel.squating.adapters.mail;
 
 import org.springframework.stereotype.Component;
-import org.tafel.squating.domain.value.TlsSnapshot;
-import org.tafel.squating.ports.outbound.TlsInspector;
+import org.tafel.squating.domain.value.MailSnapshot;
+import org.tafel.squating.ports.outbound.MailInspector;
+import org.xbill.DNS.Lookup;
+import org.xbill.DNS.MXRecord;
+import org.xbill.DNS.Record;
+import org.xbill.DNS.Type;
 
-import javax.net.ssl.SSLSocket;
-import javax.net.ssl.SSLSocketFactory;
-import java.net.SocketTimeoutException;
-import java.security.MessageDigest;
-import java.security.cert.Certificate;
-import java.security.cert.X509Certificate;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 
 @Component
-public class TlsAdapter implements TlsInspector {
-
-    private static final int HTTPS_PORT = 443;
-    private static final int CONNECT_TIMEOUT_MILLIS = 5000;
+public class MailAdapter implements MailInspector {
 
     @Override
-    public TlsSnapshot inspect(String domain) {
+    public MailSnapshot inspect(String domain) {
         if (domain == null || domain.isBlank()) {
             throw new IllegalArgumentException("domain must not be blank");
         }
 
         String normalizedDomain = normalizeDomain(domain);
 
-        try (SSLSocket socket = createSocket(normalizedDomain)) {
-            socket.setSoTimeout(CONNECT_TIMEOUT_MILLIS);
+        try {
+            Lookup lookup = new Lookup(normalizedDomain, Type.MX);
+            Record[] records = lookup.run();
 
-            socket.startHandshake();
-
-            Certificate[] certificates =
-                    socket.getSession().getPeerCertificates();
-
-            if (certificates.length == 0
-                    || !(certificates[0] instanceof X509Certificate certificate)) {
-                return emptySnapshot();
+            if (records == null || records.length == 0) {
+                return new MailSnapshot(List.of(), false);
             }
 
-            return new TlsSnapshot(
-                    certificate.getIssuerX500Principal().getName(),
-                    certificate.getSubjectX500Principal().getName(),
-                    extractSubjectAlternativeNames(certificate),
-                    certificate.getNotBefore().toInstant(),
-                    certificate.getNotAfter().toInstant(),
-                    calculateFingerprint(certificate)
+            List<String> mxRecords = List.of(records)
+                    .stream()
+                    .filter(MXRecord.class::isInstance)
+                    .map(MXRecord.class::cast)
+                    .map(record -> record.getTarget().toString())
+                    .map(this::removeTrailingDot)
+                    .toList();
+
+            return new MailSnapshot(
+                    mxRecords,
+                    !mxRecords.isEmpty()
             );
 
-        } catch (SocketTimeoutException e) {
-            return emptySnapshot();
-
         } catch (Exception e) {
-            return emptySnapshot();
+            return new MailSnapshot(List.of(), false);
         }
-    }
-
-    private SSLSocket createSocket(String domain) throws Exception {
-        SSLSocketFactory factory =
-                (SSLSocketFactory) SSLSocketFactory.getDefault();
-
-        SSLSocket socket =
-                (SSLSocket) factory.createSocket();
-
-        socket.connect(
-                new java.net.InetSocketAddress(domain, HTTPS_PORT),
-                CONNECT_TIMEOUT_MILLIS
-        );
-
-        return socket;
-    }
-
-    private List<String> extractSubjectAlternativeNames(
-            X509Certificate certificate
-    ) {
-        try {
-            Collection<List<?>> names =
-                    certificate.getSubjectAlternativeNames();
-
-            if (names == null) {
-                return List.of();
-            }
-
-            List<String> result = new ArrayList<>();
-
-            for (List<?> entry : names) {
-                if (entry == null || entry.size() < 2) {
-                    continue;
-                }
-
-                Object value = entry.get(1);
-
-                if (value != null) {
-                    result.add(value.toString());
-                }
-            }
-
-            return result;
-        } catch (Exception e) {
-            return List.of();
-        }
-    }
-
-    private String calculateFingerprint(
-            X509Certificate certificate
-    ) throws Exception {
-        MessageDigest digest =
-                MessageDigest.getInstance("SHA-256");
-
-        byte[] hash = digest.digest(certificate.getEncoded());
-
-        StringBuilder result = new StringBuilder();
-
-        for (byte value : hash) {
-            if (!result.isEmpty()) {
-                result.append(':');
-            }
-
-            result.append(String.format("%02X", value));
-        }
-
-        return result.toString();
     }
 
     private String normalizeDomain(String domain) {
         String normalized = domain.trim().toLowerCase();
 
-        if (normalized.startsWith("https://")) {
-            normalized = normalized.substring(8);
-        } else if (normalized.startsWith("http://")) {
-            normalized = normalized.substring(7);
-        }
-
-        int slashIndex = normalized.indexOf('/');
-
-        if (slashIndex >= 0) {
-            normalized = normalized.substring(0, slashIndex);
+        if (normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
         }
 
         return normalized;
     }
 
-    private TlsSnapshot emptySnapshot() {
-        return new TlsSnapshot(
-                null,
-                null,
-                List.of(),
-                null,
-                null,
-                null
-        );
+    private String removeTrailingDot(String value) {
+        if (value == null) {
+            return null;
+        }
+
+        return value.endsWith(".")
+                ? value.substring(0, value.length() - 1)
+                : value;
     }
 }
 ```
